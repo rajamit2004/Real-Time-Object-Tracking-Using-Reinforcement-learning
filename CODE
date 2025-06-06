@@ -1,0 +1,125 @@
+import torch      # for loading the YOLOv5 model
+import cv2       # access or display karne ke liye cv2
+import numpy as np        # numerical data ya operation ko accesse karne ke liye
+import random         #random action ko select kane ke liye q learning me 
+import pickle           #save or load karne ke liye 2 table pe 
+import time        # manage karne ke liye 
+
+# Load YOLOv5 model
+model = torch.hub.load('ultralytics/yolov5', 'yolov5s', pretrained=True)
+model.eval()
+
+# Reinforcement Learning parameters
+
+actions = ["Track", "Observe", "Ignore", "Search"]
+q_table = {}  # Q-learning table: {state: {action: value}}
+alpha = 0.1   # Learning rate ki kitne new information override kiya 
+gamma = 0.95  # Discount factor       rewards important
+epsilon = 0.1 # Exploration rate  
+
+# current state ko fine karne ke liye
+def get_state(detections):
+    if len(detections) > 0:
+        conf = detections.iloc[0]['confidence']
+        return round(conf, 1)  # Simplified confidence state
+    else:
+        return -1  # agr koi object detect nhi hua to -1 return 
+
+#action choose karne ke liye
+def choose_action(state):
+    if random.random() < epsilon or state not in q_table:
+        return random.choice(actions)
+    return max(q_table[state], key=q_table[state].get)
+
+# Q-learning update
+def update_q_table(prev_state, action, reward, next_state):
+    if prev_state not in q_table:
+        q_table[prev_state] = {a: 0.0 for a in actions}
+    if next_state not in q_table:
+        q_table[next_state] = {a: 0.0 for a in actions}
+    
+    old_q = q_table[prev_state][action]
+    max_future_q = max(q_table[next_state].values())
+    new_q = old_q + alpha * (reward + gamma * max_future_q - old_q)
+    q_table[prev_state][action] = new_q
+
+# Reward function based on confidence and action
+def get_reward(action, detection):
+    if detection is None:
+        return 0.2 if action == "Search" else -0.5
+    conf = detection['confidence']
+    
+    if action == "Track" and conf > 0.7:
+        return 1.0 # reward 
+    elif action == "Observe" and 0.6 < conf <= 0.7:
+        return 0.5
+    elif action == "Ignore" and conf <= 0.4:
+        return 0.3
+    elif action == "Search":
+        return 0.1
+    else:
+        return -0.5 # panelty 
+
+# Main loop with 2-second hold time
+def run_webcam_rl():
+    cap = cv2.VideoCapture(0)
+    if not cap.isOpened():
+        print("Error: Could not open webcam.")
+        return
+
+    print("Running RL agent with 2-second hold. Press 'q' to quit.")
+
+    prev_state = None
+    prev_action = None
+    last_decision_time = time.time()
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            print("Error: Could not read frame.")
+            break
+
+        current_time = time.time()
+
+        # Run YOLOv5 detection
+        results = model(frame)
+        detections = results.pandas().xyxy[0]
+        detection = detections.iloc[0] if len(detections) > 0 else None
+        current_state = get_state(detections)
+
+        # Update decision only every 2 seconds
+        if current_time - last_decision_time >= 2.0:
+            action = choose_action(current_state)
+
+            # Q-table update
+            if prev_state is not None and prev_action is not None:
+                reward = get_reward(prev_action, detection)
+                update_q_table(prev_state, prev_action, reward, current_state)
+
+            prev_state = current_state
+            prev_action = action
+            last_decision_time = current_time
+
+        # Display with current action (even if not newly updated)
+        annotated_frame = results.render()[0].copy()
+        display_action = prev_action if prev_action else "..."
+        cv2.putText(annotated_frame, f"Action: {display_action}", (10, 40),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+        cv2.imshow('YOLOv5 + Q-Learning (2s Decision)', annotated_frame)
+
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+    # Cleanup
+    cap.release()
+    cv2.destroyAllWindows()
+
+    # Save Q-table
+    with open("q_table.pkl", "wb") as f:
+        pickle.dump(q_table, f)
+
+    print("Session ended. Q-table saved.")
+
+# Run the program
+if __name__ == "__main__":
+    run_webcam_rl()
